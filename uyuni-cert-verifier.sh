@@ -47,9 +47,12 @@ for container in $(podman ps -a --format "{{.Names}}"); do
             echo "Target Path: $secret_path"
             echo "Content:"
             if echo "$secret_content" | grep -q -- "-----BEGIN CERTIFICATE-----"; then
-                echo "$secret_content" | openssl x509 -text -noout 2>/dev/null
+                # openssl x509 -text prints the full certificate details including the PEM block
+                echo "$secret_content" | openssl x509 -text 2>/dev/null
+            else
+                # For non-certificate secrets, just print the content
+                echo "$secret_content"
             fi
-            echo "$secret_content"
         done
     fi
 done
