@@ -46,6 +46,9 @@ for container in $(podman ps -a --format "{{.Names}}"); do
             echo "Secret Name: $secret_name"
             echo "Target Path: $secret_path"
             echo "Content:"
+            if echo "$secret_content" | grep -q -- "-----BEGIN CERTIFICATE-----"; then
+                echo "$secret_content" | openssl x509 -text -noout 2>/dev/null
+            fi
             echo "$secret_content"
         done
     fi
