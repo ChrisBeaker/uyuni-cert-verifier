@@ -33,7 +33,7 @@ CA_BUNDLE_FILE=$(mktemp)
 # Ensure cleanup on exit
 trap 'rm -f "$CA_BUNDLE_FILE"' EXIT
 
-echo "## Podman Certificate Verifier - Generated on $(date)"
+echo "## SUSE Multi Linux Manager Certificate Verifier - Generated on $(date)"
 echo "## Phase 1: Finding CA certificates..."
 
 # --- Pass 1: Collect CA Certificates ---
