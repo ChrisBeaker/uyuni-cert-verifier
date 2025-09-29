@@ -28,6 +28,7 @@ if [ ! -f "$SECRETS_DB_FILE" ]; then
 fi
 
 # --- Initialization ---
+OVERALL_STATUS=0 # 0 for success, 1 for failure
 CA_BUNDLE_FILE=$(mktemp)
 # Ensure cleanup on exit
 trap 'rm -f "$CA_BUNDLE_FILE"' EXIT
@@ -109,7 +110,7 @@ for container in $CONTAINERS; do
         secret_content=$(echo "$encoded_content" | base64 -d 2>/dev/null)
 
         # Process only if it's a certificate
-        if echo "$secret_content" | grep -q -- "-----BEGIN CERTIFICATE-----"; then
+        if echo "$secret_content" | grep -q -- '-----BEGIN CERTIFICATE-----'; then
             PROCESSED_SECRETS[$secret_name]=1
             
             echo "---"
@@ -139,6 +140,10 @@ for container in $CONTAINERS; do
                 VALIDATION_RESULT=$(openssl verify -CAfile "$CA_BUNDLE_FILE" "$CURRENT_CERT_FILE" 2>&1)
                 rm "$CURRENT_CERT_FILE"
                 echo "  - Validation: $VALIDATION_RESULT"
+                # Update overall status if validation failed
+                if ! echo "$VALIDATION_RESULT" | grep -q "OK"; then
+                    OVERALL_STATUS=1
+                fi
             fi
 
             # --- 3. Perform DB SAN Check ---
@@ -148,11 +153,23 @@ for container in $CONTAINERS; do
                     echo "  - DB SAN Check: OK"
                 else
                     echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN')"
+                    OVERALL_STATUS=1
                 fi
             fi
         fi
     done
 done
+
+# --- Final Summary ---
+echo
+echo "======================================================================"
+echo "## Overall Status"
+echo "======================================================================"
+if [[ "$OVERALL_STATUS" -eq 0 ]]; then
+    echo "All tests passed."
+else
+    echo "One or more tests failed. Please review the report."
+fi
 
 echo
 echo "## End of Report"
