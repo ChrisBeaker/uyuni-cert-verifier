@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script inspects podman secrets to verify certificate chains and properties.
+# This script inspects podman secrets of a SUSE Multi Linux Manager installation to verify certificate chains and properties.
 #
 # It performs the following steps:
 # 1. Creates a temporary CA bundle file.
