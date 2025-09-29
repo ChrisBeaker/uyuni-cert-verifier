@@ -143,10 +143,11 @@ for container in $CONTAINERS; do
 
             # --- 3. Perform DB SAN Check ---
             if [[ "$secret_name" == "uyuni-db-cert" ]]; then
-                if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* ]]; then
+                SUBJECT_CN=$(echo "$secret_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
+                if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* && "$SANS" == *"DNS:$SUBJECT_CN"* ]]; then
                     echo "  - DB SAN Check: OK"
                 else
-                    echo "  - DB SAN Check: FAILED (Missing 'reportdb' or 'db')"
+                    echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN')"
                 fi
             fi
         fi
