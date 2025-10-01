@@ -32,11 +32,24 @@ if [ ! -f "$SECRETS_DB_FILE" ]; then
 fi
 
 # --- Initialization ---
+DEBUG_MODE=0
+if [[ "$1" == "--debug" ]]; then
+    DEBUG_MODE=1
+    echo "## Debug mode enabled."
+fi
+
 OVERALL_STATUS=0 # 0 for success, 1 for failure
 CA_BUNDLE_FILE=$(mktemp)
 TEMP_DIR=$(mktemp -d)
 # Ensure cleanup on exit
 trap 'rm -f "$CA_BUNDLE_FILE"; rm -rf "$TEMP_DIR"' EXIT
+
+# --- Helper Functions ---
+debug_echo() {
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+        echo "DEBUG: $1"
+    fi
+}
 
 echo "## SUSE Multi Linux Manager Certificate Verifier - Generated on $(date)"
 echo "## Phase 1: Finding and Verifying CA certificates..."
@@ -74,11 +87,11 @@ for container in $CONTAINERS; do
                     for cert_file in "$CERT_DIR"/cert-*.pem; do
                         [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
                         
-                        echo "DEBUG: Processing $cert_file"
+                        debug_echo "Processing $cert_file"
                         SUBJECT_HASH=$(openssl x509 -in "$cert_file" -noout -subject_hash 2>/dev/null)
                         ISSUER_HASH=$(openssl x509 -in "$cert_file" -noout -issuer_hash 2>/dev/null)
-                        echo "DEBUG: Subject Hash: $SUBJECT_HASH"
-                        echo "DEBUG: Issuer Hash: $ISSUER_HASH"
+                        debug_echo "Subject Hash: $SUBJECT_HASH"
+                        debug_echo "Issuer Hash: $ISSUER_HASH"
 
                         if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
                             ROOT_CA_PEM=$(cat "$cert_file")
