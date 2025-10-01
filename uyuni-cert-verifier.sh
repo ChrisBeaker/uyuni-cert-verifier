@@ -74,8 +74,11 @@ for container in $CONTAINERS; do
                     for cert_file in "$CERT_DIR"/cert-*.pem; do
                         [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
                         
+                        echo "DEBUG: Processing $cert_file"
                         SUBJECT_HASH=$(openssl x509 -in "$cert_file" -noout -subject_hash 2>/dev/null)
                         ISSUER_HASH=$(openssl x509 -in "$cert_file" -noout -issuer_hash 2>/dev/null)
+                        echo "DEBUG: Subject Hash: $SUBJECT_HASH"
+                        echo "DEBUG: Issuer Hash: $ISSUER_HASH"
 
                         if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
                             ROOT_CA_PEM=$(cat "$cert_file")
