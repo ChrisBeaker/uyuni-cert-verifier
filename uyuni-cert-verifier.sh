@@ -22,6 +22,10 @@ if ! command -v openssl &> /dev/null; then
     echo "Error: openssl command not found. Please install it." >&2
     exit 1
 fi
+if ! command -v awk &> /dev/null; then
+    echo "Error: awk command not found. Please install it." >&2
+    exit 1
+fi
 if [ ! -f "$SECRETS_DB_FILE" ]; then
     echo "Error: The secrets database file was not found at $SECRETS_DB_FILE" >&2
     exit 1
@@ -30,13 +34,14 @@ fi
 # --- Initialization ---
 OVERALL_STATUS=0 # 0 for success, 1 for failure
 CA_BUNDLE_FILE=$(mktemp)
+TEMP_DIR=$(mktemp -d)
 # Ensure cleanup on exit
-trap 'rm -f "$CA_BUNDLE_FILE"' EXIT
+trap 'rm -f "$CA_BUNDLE_FILE"; rm -rf "$TEMP_DIR"' EXIT
 
 echo "## SUSE Multi Linux Manager Certificate Verifier - Generated on $(date)"
-echo "## Phase 1: Finding CA certificates..."
+echo "## Phase 1: Finding and Verifying CA certificates..."
 
-# --- Pass 1: Collect CA Certificates ---
+# --- Pass 1: Collect and Verify CA Certificates ---
 CONTAINERS=$(podman ps -a --format "{{.Names}}")
 
 for container in $CONTAINERS; do
@@ -59,11 +64,56 @@ for container in $CONTAINERS; do
                 if [ -n "$secret_id" ]; then
                     encoded_content=$(grep """$secret_id""" "$SECRETS_DB_FILE" | cut -d'"' -f4)
                     decoded_content=$(echo "$encoded_content" | base64 -d 2>/dev/null)
-                    # Append a newline just in case the cert file doesn't have one
-                    echo -e "\n$decoded_content" >> "$CA_BUNDLE_FILE"
+
+                    # --- Certificate Splitting and Identification ---
+                    CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
+                    # Split PEM bundle into individual certs
+                    # The awk command creates cert-1.pem, cert-2.pem, etc. It might create an empty cert-0.pem if the input starts with the delimiter.
+                    awk 'BEGIN {c=0;} /-----BEGIN CERTIFICATE-----/ {c++;} { print > "'""$CERT_DIR""'/cert-" c ".pem"; }' <<< "$decoded_content"
+
+                    ROOT_CA_PEM=""
+                    SUB_CA_PEM=""
+                    for cert_file in "$CERT_DIR"/cert-*.pem; do
+                        [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
+                        
+                        SUBJECT=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)
+                        ISSUER=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)
+
+                        if [[ -n "$SUBJECT" && "$SUBJECT" == "$ISSUER" ]]; then
+                            ROOT_CA_PEM=$(cat "$cert_file")
+                        else
+                            SUB_CA_PEM=$(cat "$cert_file")
+                        fi
+                    done
+
+                    # --- CA Logic and Chain Validation ---
+                    if [ -n "$ROOT_CA_PEM" ] && [ -n "$SUB_CA_PEM" ]; then
+                        echo "  - Found Root CA and Sub-CA in '$secret_name'."
+                        ROOT_CA_TMP="$TEMP_DIR/root_ca.pem"
+                        SUB_CA_TMP="$TEMP_DIR/sub_ca.pem"
+                        echo "$ROOT_CA_PEM" > "$ROOT_CA_TMP"
+                        echo "$SUB_CA_PEM" > "$SUB_CA_TMP"
+
+                        VALIDATION_RESULT=$(openssl verify -CAfile "$ROOT_CA_TMP" "$SUB_CA_TMP" 2>&1)
+                        echo "  - CA Chain Validation: $VALIDATION_RESULT"
+                        if echo "$VALIDATION_RESULT" | grep -q "OK"; then
+                            echo "  - CA chain is valid. Adding both Root CA and Sub-CA to the verification bundle."
+                            echo -e "\n$SUB_CA_PEM" >> "$CA_BUNDLE_FILE"
+                            echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
+                        else
+                            OVERALL_STATUS=1
+                            echo "  - FAILED: Sub-CA in '$secret_name' is not signed by the Root CA."
+                        fi
+
+                    elif [ -n "$ROOT_CA_PEM" ]; then
+                        echo "  - Found only a Root CA in '$secret_name'. Adding to verification bundle."
+                        echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
+                    elif [ -n "$SUB_CA_PEM" ]; then
+                        echo "  - FAILED: Found a Sub-CA in '$secret_name' without a corresponding Root CA in the same secret."
+                        OVERALL_STATUS=1
+                    fi
                 fi
-                # Break inner loop once matched
-                break
+                break # Break inner loop once matched
             fi
         done
     done
