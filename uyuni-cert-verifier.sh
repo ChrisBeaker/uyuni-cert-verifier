@@ -54,7 +54,7 @@ for container in $CONTAINERS; do
         continue
     fi
 
-    echo "$secret_definitions" | while IFS= read -r line; do
+    while IFS= read -r line; do
         secret_name=$(echo "$line" | cut -d',' -f1)
         
         for ca_name in "${CA_NAMES[@]}"; do
@@ -67,8 +67,6 @@ for container in $CONTAINERS; do
 
                     # --- Certificate Splitting and Identification ---
                     CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
-                    # Split PEM bundle into individual certs
-                    # The awk command creates cert-1.pem, cert-2.pem, etc. It might create an empty cert-0.pem if the input starts with the delimiter.
                     awk 'BEGIN {c=0;} /-----BEGIN CERTIFICATE-----/ {c++;} { print > "'""$CERT_DIR""'/cert-" c ".pem"; }' <<< "$decoded_content"
 
                     ROOT_CA_PEM=""
@@ -76,10 +74,10 @@ for container in $CONTAINERS; do
                     for cert_file in "$CERT_DIR"/cert-*.pem; do
                         [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
                         
-                        SUBJECT=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)
-                        ISSUER=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)
+                        SUBJECT_HASH=$(openssl x509 -in "$cert_file" -noout -subject_hash 2>/dev/null)
+                        ISSUER_HASH=$(openssl x509 -in "$cert_file" -noout -issuer_hash 2>/dev/null)
 
-                        if [[ -n "$SUBJECT" && "$SUBJECT" == "$ISSUER" ]]; then
+                        if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
                             ROOT_CA_PEM=$(cat "$cert_file")
                         else
                             SUB_CA_PEM=$(cat "$cert_file")
@@ -115,8 +113,10 @@ for container in $CONTAINERS; do
                 fi
                 break # Break inner loop once matched
             fi
+        
         done
-    done
+    done <<< "$secret_definitions"
+
 done
 
 echo "## Phase 2: Verifying all certificates..."
@@ -139,7 +139,7 @@ for container in $CONTAINERS; do
     echo "## Container: $container"
     echo "======================================================================"
 
-    echo "$secret_definitions" | while IFS= read -r line; do
+    while IFS= read -r line; do
         secret_name=$(echo "$line" | cut -d',' -f1)
         secret_path=$(echo "$line" | sed -n 's/.*target=\(.*\)$/\1/p')
 
@@ -185,7 +185,7 @@ for container in $CONTAINERS; do
             else
                 echo "  - Type     : Server/Client Certificate"
                 # Create a temporary file for the current certificate to verify
-                CURRENT_CERT_FILE=$(mktemp)
+                CURRENT_CERT_FILE=$(mktemp -p "$TEMP_DIR")
                 echo "$secret_content" > "$CURRENT_CERT_FILE"
                 VALIDATION_RESULT=$(openssl verify -CAfile "$CA_BUNDLE_FILE" "$CURRENT_CERT_FILE" 2>&1)
                 rm "$CURRENT_CERT_FILE"
@@ -207,9 +207,9 @@ for container in $CONTAINERS; do
                 fi
             fi
         fi
-    done
-done
+    done <<< "$secret_definitions"
 
+done
 # --- Final Summary ---
 echo
 echo "======================================================================"
