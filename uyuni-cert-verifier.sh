@@ -54,6 +54,7 @@ debug_echo() {
 echo "## SUSE Multi Linux Manager Certificate Verifier - Generated on $(date)"
 echo "## Phase 1: Finding and Verifying CA certificates..."
 
+declare -A PROCESSED_CA_SECRETS # Array to track processed CA secrets
 # --- Pass 1: Collect and Verify CA Certificates ---
 CONTAINERS=$(podman ps -a --format "{{.Names}}")
 
@@ -72,6 +73,12 @@ for container in $CONTAINERS; do
         
         for ca_name in "${CA_NAMES[@]}"; do
             if [[ "$secret_name" == "$ca_name" ]]; then
+                if [[ -v "PROCESSED_CA_SECRETS[$secret_name]" ]]; then
+                    echo "Found CA secret: '$secret_name' in container '$container' (already processed, skipping)"
+                    break
+                fi
+                PROCESSED_CA_SECRETS[$secret_name]=1
+
                 echo "Found CA secret: '$secret_name' in container '$container'"
                 secret_id=$(podman secret inspect --format '{{.ID}}' "$secret_name" 2>/dev/null)
                 if [ -n "$secret_id" ]; then
