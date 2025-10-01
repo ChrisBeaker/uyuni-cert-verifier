@@ -131,7 +131,8 @@ for container in $CONTAINERS; do
                         VALIDATION_RESULT=$(openssl verify -CAfile "$ROOT_CA_TMP" "$SUB_CA_TMP" 2>&1)
                         echo "  - CA Chain Validation: $VALIDATION_RESULT"
                         if echo "$VALIDATION_RESULT" | grep -q "OK"; then
-                            echo "  - CA chain is valid. Adding '$ROOT_CA_CN' and '$SUB_CA_CN' to the verification bundle."
+                            echo "  - CA chain is valid."
+                            echo "  - Adding '$ROOT_CA_CN' and '$SUB_CA_CN' to the verification bundle."
                             echo -e "\n$SUB_CA_PEM" >> "$CA_BUNDLE_FILE"
                             echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
                         else
@@ -140,7 +141,8 @@ for container in $CONTAINERS; do
                         fi
 
                     elif [ -n "$ROOT_CA_PEM" ]; then
-                        echo "  - Found only a Root CA: '$ROOT_CA_CN'. Adding to verification bundle."
+                        echo "  - Found only a Root CA: '$ROOT_CA_CN'."
+                        echo "  - Adding to verification bundle."
                         echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
                     elif [ -n "$SUB_CA_PEM" ]; then
                         echo "  - FAILED: Found a Sub-CA '$SUB_CA_CN' in '$secret_name' without a corresponding Root CA in the same secret."
