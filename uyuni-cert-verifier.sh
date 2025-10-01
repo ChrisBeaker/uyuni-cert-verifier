@@ -87,22 +87,30 @@ for container in $CONTAINERS; do
 
                     # --- Certificate Splitting and Identification ---
                     CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
-                    awk 'BEGIN {c=0;} /-----BEGIN CERTIFICATE-----/ {c++;} { print > "'""$CERT_DIR""'/cert-" c ".pem"; }' <<< "$decoded_content"
+                    # Use a more robust awk command to avoid creating empty/garbage files
+                    (cd "$CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$decoded_content")
 
                     ROOT_CA_PEM=""
                     SUB_CA_PEM=""
                     ROOT_CA_CN=""
                     SUB_CA_CN=""
                     for cert_file in "$CERT_DIR"/cert-*.pem; do
-                        [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
+                        [ -f "$cert_file" ] || continue # Check if file exists (in case of no certs in secret)
                         
-                        debug_echo "Processing $cert_file"
                         SUBJECT_HASH=$(openssl x509 -in "$cert_file" -noout -subject_hash 2>/dev/null)
                         ISSUER_HASH=$(openssl x509 -in "$cert_file" -noout -issuer_hash 2>/dev/null)
+
+                        # Ensure the file is a valid certificate before processing
+                        if [[ -z "$SUBJECT_HASH" || -z "$ISSUER_HASH" ]]; then
+                            debug_echo "Could not parse as a certificate: $cert_file"
+                            continue
+                        fi
+
+                        debug_echo "Processing $cert_file"
                         debug_echo "Subject Hash: $SUBJECT_HASH"
                         debug_echo "Issuer Hash: $ISSUER_HASH"
 
-                        if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
+                        if [[ "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
                             ROOT_CA_PEM=$(cat "$cert_file")
                             ROOT_CA_CN=$(echo "$ROOT_CA_PEM" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
                         else
