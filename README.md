@@ -1,6 +1,6 @@
 # uyuni-cert-verifier
 
-This script inspects podman secrets of a SUSE Multi Linux Manager installation to verify certificate chains and properties.
+This script inspects the podman secrets of a SUSE Multi Linux Manager (SMLM) installation to verify certificate chains and properties. These secrets (certificates) will be used inside the SMLM containers.
 
 It performs the following steps:
 1. Creates a temporary CA bundle file.
@@ -13,8 +13,14 @@ It performs the following steps:
    - It performs a specific SAN check for the database certificate.
 4. Cleans up the temporary CA bundle file.
 
-Node:
+Nodes:
+This has only been tested on SMLM 5.1 or highe
 
-Currently only tested on SMLM >= 5.1
+If sub CAs are used, it is expected that the root CA and all sub CAs are in the uyuni-ca or uyuni-db-ca secrets. 
+This can happen in two ways during installation:
+- The mgradm install podman parameters --ssl-ca-intermediate and/or --ssl-db-ca-intermediate were used to provide the sub CAs.
+- Alternatively, only the --ssl-ca-root or --ssl-db-ca-root parameters were used, but the file provided for these parameters
+  was already contained the root CA and all sub CAs combined into a single file.
+
 
 

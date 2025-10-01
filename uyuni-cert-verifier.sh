@@ -87,7 +87,6 @@ for container in $CONTAINERS; do
 
                     # --- Certificate Splitting and Identification ---
                     CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
-                    # Use a more robust awk command to avoid creating empty/garbage files
                     (cd "$CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$decoded_content")
 
                     ROOT_CA_PEM=""
