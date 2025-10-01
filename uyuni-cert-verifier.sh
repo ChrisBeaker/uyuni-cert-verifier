@@ -91,6 +91,8 @@ for container in $CONTAINERS; do
 
                     ROOT_CA_PEM=""
                     SUB_CA_PEM=""
+                    ROOT_CA_CN=""
+                    SUB_CA_CN=""
                     for cert_file in "$CERT_DIR"/cert-*.pem; do
                         [ -s "$cert_file" ] || continue # Skip empty or zero-byte files
                         
@@ -102,14 +104,17 @@ for container in $CONTAINERS; do
 
                         if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
                             ROOT_CA_PEM=$(cat "$cert_file")
+                            ROOT_CA_CN=$(echo "$ROOT_CA_PEM" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
                         else
                             SUB_CA_PEM=$(cat "$cert_file")
+                            SUB_CA_CN=$(echo "$SUB_CA_PEM" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
                         fi
                     done
 
                     # --- CA Logic and Chain Validation ---
                     if [ -n "$ROOT_CA_PEM" ] && [ -n "$SUB_CA_PEM" ]; then
-                        echo "  - Found Root CA and Sub-CA in '$secret_name'."
+                        echo "  - Found Root CA: '$ROOT_CA_CN'"
+                        echo "  - Found Sub-CA: '$SUB_CA_CN'"
                         ROOT_CA_TMP="$TEMP_DIR/root_ca.pem"
                         SUB_CA_TMP="$TEMP_DIR/sub_ca.pem"
                         echo "$ROOT_CA_PEM" > "$ROOT_CA_TMP"
@@ -118,19 +123,19 @@ for container in $CONTAINERS; do
                         VALIDATION_RESULT=$(openssl verify -CAfile "$ROOT_CA_TMP" "$SUB_CA_TMP" 2>&1)
                         echo "  - CA Chain Validation: $VALIDATION_RESULT"
                         if echo "$VALIDATION_RESULT" | grep -q "OK"; then
-                            echo "  - CA chain is valid. Adding both Root CA and Sub-CA to the verification bundle."
+                            echo "  - CA chain is valid. Adding '$ROOT_CA_CN' and '$SUB_CA_CN' to the verification bundle."
                             echo -e "\n$SUB_CA_PEM" >> "$CA_BUNDLE_FILE"
                             echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
                         else
                             OVERALL_STATUS=1
-                            echo "  - FAILED: Sub-CA in '$secret_name' is not signed by the Root CA."
+                            echo "  - FAILED: Sub-CA '$SUB_CA_CN' in '$secret_name' is not signed by Root CA '$ROOT_CA_CN'."
                         fi
 
                     elif [ -n "$ROOT_CA_PEM" ]; then
-                        echo "  - Found only a Root CA in '$secret_name'. Adding to verification bundle."
+                        echo "  - Found only a Root CA: '$ROOT_CA_CN'. Adding to verification bundle."
                         echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
                     elif [ -n "$SUB_CA_PEM" ]; then
-                        echo "  - FAILED: Found a Sub-CA in '$secret_name' without a corresponding Root CA in the same secret."
+                        echo "  - FAILED: Found a Sub-CA '$SUB_CA_CN' in '$secret_name' without a corresponding Root CA in the same secret."
                         OVERALL_STATUS=1
                     fi
                 fi
