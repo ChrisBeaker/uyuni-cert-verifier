@@ -204,45 +204,59 @@ for container in $CONTAINERS; do
             echo "Secret Name: $secret_name"
             echo "Target Path: $secret_path"
 
-            # --- 1. Display Essential Info ---
-            echo "  - Subject  : $(echo "$secret_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')"
-            echo "  - Issuer   : $(echo "$secret_content" | openssl x509 -noout -issuer -nameopt multiline | sed -n 's/.*commonName.*= //p')"
-            echo "  - Valid From: $(echo "$secret_content" | openssl x509 -noout -startdate | cut -d= -f2)"
-            echo "  - Valid Until: $(echo "$secret_content" | openssl x509 -noout -enddate | cut -d= -f2)"
-            
-            SANS=$(echo "$secret_content" | openssl x509 -noout -ext subjectAltName 2>/dev/null)
-            if [[ -n "$SANS" ]]; then
-                echo "  - SANs     : ${SANS//DNS:/ }"
-            fi
+            # --- Certificate Splitting ---
+            CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
+            (cd "$CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$secret_content")
 
-            # --- 2. Perform Validation ---
-            # Check if the cert is a CA itself by checking Basic Constraints
-            if echo "$secret_content" | openssl x509 -noout -text | grep -q "CA:TRUE"; then
-                echo "  - Type     : CA Certificate"
-            else
-                echo "  - Type     : Server/Client Certificate"
-                # Create a temporary file for the current certificate to verify
-                CURRENT_CERT_FILE=$(mktemp -p "$TEMP_DIR")
-                echo "$secret_content" > "$CURRENT_CERT_FILE"
-                VALIDATION_RESULT=$(openssl verify -CAfile "$CA_BUNDLE_FILE" "$CURRENT_CERT_FILE" 2>&1)
-                rm "$CURRENT_CERT_FILE"
-                echo "  - Validation: $VALIDATION_RESULT"
-                # Update overall status if validation failed
-                if ! echo "$VALIDATION_RESULT" | grep -q "OK"; then
-                    OVERALL_STATUS=1
+            CERT_COUNT=$(ls -1 "$CERT_DIR"/*.pem 2>/dev/null | wc -l)
+            CERT_INDEX=0
+            for cert_file in "$CERT_DIR"/cert-*.pem; do
+                [ -f "$cert_file" ] || continue
+                CERT_INDEX=$((CERT_INDEX + 1))
+
+                # If there are multiple certs, add a small separator
+                if [[ $CERT_COUNT -gt 1 && $CERT_INDEX -gt 1 ]]; then
+                    echo "  ---"
                 fi
-            fi
 
-            # --- 3. Perform DB SAN Check ---
-            if [[ "$secret_name" == "uyuni-db-cert" ]]; then
-                SUBJECT_CN=$(echo "$secret_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
-                if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* && "$SANS" == *"DNS:$SUBJECT_CN"* ]]; then
-                    echo "  - DB SAN Check: OK"
+                cert_content=$(cat "$cert_file")
+
+                # --- 1. Display Essential Info ---
+                echo "  - Subject  : $(echo "$cert_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')"
+                echo "  - Issuer   : $(echo "$cert_content" | openssl x509 -noout -issuer -nameopt multiline | sed -n 's/.*commonName.*= //p')"
+                echo "  - Valid From: $(echo "$cert_content" | openssl x509 -noout -startdate | cut -d= -f2)"
+                echo "  - Valid Until: $(echo "$cert_content" | openssl x509 -noout -enddate | cut -d= -f2)"
+
+                SANS=$(echo "$cert_content" | openssl x509 -noout -ext subjectAltName 2>/dev/null)
+                if [[ -n "$SANS" ]]; then
+                    echo "  - SANs     : ${SANS//DNS:/ }"
+                fi
+
+                # --- 2. Perform Validation ---
+                # Check if the cert is a CA itself by checking Basic Constraints
+                if echo "$cert_content" | openssl x509 -noout -text | grep -q "CA:TRUE"; then
+                    echo "  - Type     : CA Certificate"
                 else
-                    echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN')"
-                    OVERALL_STATUS=1
+                    echo "  - Type     : Server/Client Certificate"
+                    VALIDATION_RESULT=$(openssl verify -CAfile "$CA_BUNDLE_FILE" "$cert_file" 2>&1)
+                    echo "  - Validation: $VALIDATION_RESULT"
+                    # Update overall status if validation failed
+                    if ! echo "$VALIDATION_RESULT" | grep -q "OK"; then
+                        OVERALL_STATUS=1
+                    fi
                 fi
-            fi
+
+                # --- 3. Perform DB SAN Check ---
+                if [[ "$secret_name" == "uyuni-db-cert" ]]; then
+                    SUBJECT_CN=$(echo "$cert_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
+                    if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* && "$SANS" == *"DNS:$SUBJECT_CN"* ]]; then
+                        echo "  - DB SAN Check: OK"
+                    else
+                        echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN')"
+                        OVERALL_STATUS=1
+                    fi
+                fi
+            done
         fi
     done <<< "$secret_definitions"
 
