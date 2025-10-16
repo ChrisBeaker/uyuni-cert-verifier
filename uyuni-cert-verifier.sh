@@ -39,6 +39,7 @@ if [[ "$1" == "--debug" ]]; then
 fi
 
 OVERALL_STATUS=0 # 0 for success, 1 for failure
+LEGACY_CA_STRUCTURE_DETECTED=0 # 0 for false, 1 for true
 CA_BUNDLE_FILE=$(mktemp)
 TEMP_DIR=$(mktemp -d)
 # Ensure cleanup on exit
@@ -54,12 +55,14 @@ debug_echo() {
 echo "## SUSE Multi Linux Manager Certificate Verifier - Generated on $(date)"
 echo "## Phase 1: Finding and Verifying CA certificates..."
 
-declare -A PROCESSED_CA_SECRETS # Array to track processed CA secrets
-# --- Pass 1: Collect and Verify CA Certificates ---
+declare -A PROCESSED_SECRET_IDS # Array to track processed secret IDs to avoid redundant work
+declare -A PROCESSED_CA_FINGERPRINTS # Array to track processed CA certificate fingerprints to avoid duplicates
+# --- Pass 1: Collect All CA Certificates from All Secrets ---
 CONTAINERS=$(podman ps -a --format "{{.Names}}")
 
 for container in $CONTAINERS; do
-    secret_definitions=$(podman inspect "$container" --format '''{{range .Config.CreateCommand}}{{.}}{{"\n"}}{{end}}''' \
+    debug_echo "Scanning container '$container' for secrets..."
+    secret_definitions=$(podman inspect "$container" --format '{{range .Config.CreateCommand}}{{.}}{{"\n"}}{{end}}' \
         | grep -A 1 -- '--secret' \
         | grep -v -- '--secret' \
         | grep -v 'type=env')
@@ -70,90 +73,55 @@ for container in $CONTAINERS; do
 
     while IFS= read -r line; do
         secret_name=$(echo "$line" | cut -d',' -f1)
+        secret_id=$(podman secret inspect --format '{{.ID}}' "$secret_name" 2>/dev/null)
         
-        for ca_name in "${CA_NAMES[@]}"; do
-            if [[ "$secret_name" == "$ca_name" ]]; then
-                if [[ -v "PROCESSED_CA_SECRETS[$secret_name]" ]]; then
-                    echo "Found CA secret: '$secret_name' in container '$container' (already processed, skipping)"
-                    break
-                fi
-                PROCESSED_CA_SECRETS[$secret_name]=1
+        if [ -z "$secret_id" ]; then
+            debug_echo "Could not get ID for secret '$secret_name', skipping."
+            continue
+        fi
 
-                echo "Found CA secret: '$secret_name' in container '$container'"
-                secret_id=$(podman secret inspect --format '{{.ID}}' "$secret_name" 2>/dev/null)
-                if [ -n "$secret_id" ]; then
-                    encoded_content=$(grep """$secret_id""" "$SECRETS_DB_FILE" | cut -d'"' -f4)
-                    decoded_content=$(echo "$encoded_content" | base64 -d 2>/dev/null)
+        if [[ -v "PROCESSED_SECRET_IDS[$secret_id]" ]]; then
+            debug_echo "Secret '$secret_name' (ID: $secret_id) already processed, skipping."
+            continue
+        fi
+        PROCESSED_SECRET_IDS[$secret_id]=1
 
-                    # --- Certificate Splitting and Identification ---
-                    CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
-                    (cd "$CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$decoded_content")
+        encoded_content=$(grep """$secret_id""" "$SECRETS_DB_FILE" | cut -d'"' -f4)
+        secret_content=$(echo "$encoded_content" | base64 -d 2>/dev/null)
 
-                    ROOT_CA_PEM=""
-                    SUB_CA_PEM=""
-                    ROOT_CA_CN=""
-                    SUB_CA_CN=""
-                    for cert_file in "$CERT_DIR"/cert-*.pem; do
-                        [ -f "$cert_file" ] || continue # Check if file exists (in case of no certs in secret)
-                        
-                        SUBJECT_HASH=$(openssl x509 -in "$cert_file" -noout -subject_hash 2>/dev/null)
-                        ISSUER_HASH=$(openssl x509 -in "$cert_file" -noout -issuer_hash 2>/dev/null)
+        # Process only if it's a certificate
+        if echo "$secret_content" | grep -q -- '-----BEGIN CERTIFICATE-----'; then
+            debug_echo "Found certificate(s) in secret '$secret_name'"
+            
+            CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
+            (cd "$CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$secret_content")
 
-                        # Ensure the file is a valid certificate before processing
-                        if [[ -z "$SUBJECT_HASH" || -z "$ISSUER_HASH" ]]; then
-                            debug_echo "Could not parse as a certificate: $cert_file"
-                            continue
-                        fi
+            for cert_file in "$CERT_DIR"/cert-*.pem; do
+                [ -f "$cert_file" ] || continue
+                cert_content_single=$(cat "$cert_file")
 
-                        debug_echo "Processing $cert_file"
-                        debug_echo "Subject Hash: $SUBJECT_HASH"
-                        debug_echo "Issuer Hash: $ISSUER_HASH"
-
-                        if [[ "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
-                            ROOT_CA_PEM=$(cat "$cert_file")
-                            ROOT_CA_CN=$(echo "$ROOT_CA_PEM" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
-                        else
-                            SUB_CA_PEM=$(cat "$cert_file")
-                            SUB_CA_CN=$(echo "$SUB_CA_PEM" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
-                        fi
-                    done
-
-                    # --- CA Logic and Chain Validation ---
-                    if [ -n "$ROOT_CA_PEM" ] && [ -n "$SUB_CA_PEM" ]; then
-                        echo "  - Found Root CA: '$ROOT_CA_CN'"
-                        echo "  - Found Sub-CA: '$SUB_CA_CN'"
-                        ROOT_CA_TMP="$TEMP_DIR/root_ca.pem"
-                        SUB_CA_TMP="$TEMP_DIR/sub_ca.pem"
-                        echo "$ROOT_CA_PEM" > "$ROOT_CA_TMP"
-                        echo "$SUB_CA_PEM" > "$SUB_CA_TMP"
-
-                        VALIDATION_RESULT=$(openssl verify -CAfile "$ROOT_CA_TMP" "$SUB_CA_TMP" 2>&1)
-                        echo "  - CA Chain Validation: $VALIDATION_RESULT"
-                        if echo "$VALIDATION_RESULT" | grep -q "OK"; then
-                            echo "  - CA chain is valid."
-                            echo "  - Adding '$ROOT_CA_CN' and '$SUB_CA_CN' to the verification bundle."
-                            echo -e "\n$SUB_CA_PEM" >> "$CA_BUNDLE_FILE"
-                            echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
-                        else
-                            OVERALL_STATUS=1
-                            echo "  - FAILED: Sub-CA '$SUB_CA_CN' in '$secret_name' is not signed by Root CA '$ROOT_CA_CN'."
-                        fi
-
-                    elif [ -n "$ROOT_CA_PEM" ]; then
-                        echo "  - Found only a Root CA: '$ROOT_CA_CN'."
-                        echo "  - Adding to verification bundle."
-                        echo -e "\n$ROOT_CA_PEM" >> "$CA_BUNDLE_FILE"
-                    elif [ -n "$SUB_CA_PEM" ]; then
-                        echo "  - FAILED: Found a Sub-CA '$SUB_CA_CN' in '$secret_name' without a corresponding Root CA in the same secret."
-                        OVERALL_STATUS=1
+                # Check if the cert is a CA
+                if echo "$cert_content_single" | openssl x509 -noout -text | grep -q "CA:TRUE"; then
+                    FINGERPRINT=$(echo "$cert_content_single" | openssl x509 -noout -fingerprint -sha256)
+                    
+                    if [[ -v "PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]" ]]; then
+                        debug_echo "CA with fingerprint $FINGERPRINT already processed, skipping."
+                        continue
                     fi
+                    PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]=1
+                    
+                    CA_CN=$(echo "$cert_content_single" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
+                    echo "Found CA: '$CA_CN' in secret '$secret_name'. Adding to verification bundle."
+                    
+                    # Add a newline if the bundle isn't empty
+                    if [ -s "$CA_BUNDLE_FILE" ]; then
+                        echo "" >> "$CA_BUNDLE_FILE"
+                    fi
+                    echo "$cert_content_single" >> "$CA_BUNDLE_FILE"
                 fi
-                break # Break inner loop once matched
-            fi
-        
-        done
+            done
+        fi
     done <<< "$secret_definitions"
-
 done
 
 echo "## Phase 2: Verifying all certificates..."
@@ -199,6 +167,38 @@ for container in $CONTAINERS; do
         # Process only if it's a certificate
         if echo "$secret_content" | grep -q -- '-----BEGIN CERTIFICATE-----'; then
             PROCESSED_SECRETS[$secret_name]=1
+
+            # --- Legacy Structure Check ---
+            # This check runs once per relevant secret to see if it contains both a root and an intermediate CA.
+            if [[ "$secret_name" == "uyuni-ca" || "$secret_name" == "uyuni-db-ca" ]]; then
+                ROOT_CA_COUNT=0
+                INTERMEDIATE_CA_COUNT=0
+                
+                # We need to temporarily split the certs to analyze them
+                CHECK_CERT_DIR=$(mktemp -d -p "$TEMP_DIR")
+                (cd "$CHECK_CERT_DIR" && awk '/-----BEGIN CERTIFICATE-----/ { out="cert-" ++c ".pem" } out { print > out }' <<< "$secret_content")
+
+                for check_cert_file in "$CHECK_CERT_DIR"/cert-*.pem; do
+                    [ -f "$check_cert_file" ] || continue
+                    
+                    # Check if it's a CA certificate
+                    if openssl x509 -in "$check_cert_file" -noout -text 2>/dev/null | grep -q "CA:TRUE"; then
+                        SUBJECT_HASH=$(openssl x509 -in "$check_cert_file" -noout -subject_hash 2>/dev/null)
+                        ISSUER_HASH=$(openssl x509 -in "$check_cert_file" -noout -issuer_hash 2>/dev/null)
+
+                        if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
+                            ROOT_CA_COUNT=$((ROOT_CA_COUNT + 1))
+                        else
+                            INTERMEDIATE_CA_COUNT=$((INTERMEDIATE_CA_COUNT + 1))
+                        fi
+                    fi
+                done
+
+                if [[ "$ROOT_CA_COUNT" -gt 0 && "$INTERMEDIATE_CA_COUNT" -gt 0 ]]; then
+                    LEGACY_CA_STRUCTURE_DETECTED=1
+                    debug_echo "Legacy CA structure detected in secret '$secret_name'."
+                fi
+            fi
             
             echo "---"
             echo "Secret Name: $secret_name"
@@ -248,12 +248,15 @@ for container in $CONTAINERS; do
 
                 # --- 3. Perform DB SAN Check ---
                 if [[ "$secret_name" == "uyuni-db-cert" ]]; then
-                    SUBJECT_CN=$(echo "$cert_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
-                    if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* && "$SANS" == *"DNS:$SUBJECT_CN"* ]]; then
-                        echo "  - DB SAN Check: OK"
-                    else
-                        echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN')"
-                        OVERALL_STATUS=1
+                    # Only perform this check on server/client certs, not on CAs
+                    if ! echo "$cert_content" | openssl x509 -noout -text | grep -q "CA:TRUE"; then
+                        SUBJECT_CN=$(echo "$cert_content" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
+                        if [[ -n "$SANS" && "$SANS" == *"DNS:reportdb"* && "$SANS" == *"DNS:db"* && "$SANS" == *"DNS:$SUBJECT_CN"* ]]; then
+                            echo "  - DB SAN Check: OK"
+                        else
+                            echo "  - DB SAN Check: FAILED (Missing 'reportdb', 'db', or FQDN '$SUBJECT_CN' in SANs)"
+                            OVERALL_STATUS=1
+                        fi
                     fi
                 fi
             done
@@ -270,6 +273,20 @@ if [[ "$OVERALL_STATUS" -eq 0 ]]; then
     echo "All tests passed."
 else
     echo "One or more tests failed. Please review the report."
+fi
+
+if [[ "$LEGACY_CA_STRUCTURE_DETECTED" -eq 1 ]]; then
+    echo
+    echo "----------------------------------------------------------------------"
+    echo "## Recommendation"
+    echo "----------------------------------------------------------------------"
+    echo "A legacy certificate structure was detected where a root CA and an"
+    echo "intermediate CA were found together in 'uyuni-ca' or 'uyuni-db-ca'."
+    echo
+    echo "While this configuration is currently valid, the recommended structure is:"
+    echo "  - Root CA only in 'uyuni-ca' and 'uyuni-db-ca' secrets."
+    echo "  - Intermediate CA(s) bundled with the server certificate in the"
+    echo "    'uyuni-cert' and 'uyuni-db-cert' secrets."
 fi
 
 echo
