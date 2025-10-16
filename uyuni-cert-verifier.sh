@@ -102,22 +102,32 @@ for container in $CONTAINERS; do
 
                 # Check if the cert is a CA
                 if echo "$cert_content_single" | openssl x509 -noout -text | grep -q "CA:TRUE"; then
-                    FINGERPRINT=$(echo "$cert_content_single" | openssl x509 -noout -fingerprint -sha256)
-                    
-                    if [[ -v "PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]" ]]; then
-                        debug_echo "CA with fingerprint $FINGERPRINT already processed, skipping."
-                        continue
-                    fi
-                    PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]=1
-                    
                     CA_CN=$(echo "$cert_content_single" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/.*commonName.*= //p')
-                    echo "Found CA: '$CA_CN' in secret '$secret_name'. Adding to verification bundle."
-                    
-                    # Add a newline if the bundle isn't empty
-                    if [ -s "$CA_BUNDLE_FILE" ]; then
-                        echo "" >> "$CA_BUNDLE_FILE"
+
+                    # Determine if it's a Root or Intermediate CA
+                    SUBJECT_HASH=$(echo "$cert_content_single" | openssl x509 -noout -subject_hash 2>/dev/null)
+                    ISSUER_HASH=$(echo "$cert_content_single" | openssl x509 -noout -issuer_hash 2>/dev/null)
+                    CA_TYPE="Intermediate CA"
+                    if [[ -n "$SUBJECT_HASH" && "$SUBJECT_HASH" == "$ISSUER_HASH" ]]; then
+                        CA_TYPE="Root CA"
                     fi
-                    echo "$cert_content_single" >> "$CA_BUNDLE_FILE"
+
+                    echo "Found $CA_TYPE: '$CA_CN' in secret '$secret_name'."
+
+                    # Now, handle adding to the bundle with de-duplication
+                    FINGERPRINT=$(echo "$cert_content_single" | openssl x509 -noout -fingerprint -sha256)
+                    if [[ -v "PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]" ]]; then
+                        debug_echo "CA with fingerprint $FINGERPRINT already processed, not adding to bundle again."
+                    else
+                        echo "Adding '$CA_CN' to verification bundle."
+                        PROCESSED_CA_FINGERPRINTS[$FINGERPRINT]=1
+                        
+                        # Add a newline if the bundle isn't empty
+                        if [ -s "$CA_BUNDLE_FILE" ]; then
+                            echo "" >> "$CA_BUNDLE_FILE"
+                        fi
+                        echo "$cert_content_single" >> "$CA_BUNDLE_FILE"
+                    fi
                 fi
             done
         fi
