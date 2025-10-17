@@ -375,8 +375,13 @@ func getSecretID(secretName string) (string, error) {
 }
 
 func isRootCA(cert *x509.Certificate) bool {
-	// A root CA is self-signed.
-	return cert.IsCA && cert.Subject.CommonName == cert.Issuer.CommonName && bytes.Equal(cert.SubjectKeyId, cert.AuthorityKeyId)
+	// A root CA is a self-signed CA certificate.
+	// We can verify this by checking if the certificate's signature can be verified by its own public key.
+	if !cert.IsCA {
+		return false
+	}
+	err := cert.CheckSignatureFrom(cert)
+	return err == nil
 }
 
 func detectLegacyStructure(certs []*x509.Certificate) bool {
